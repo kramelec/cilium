@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright 2018-2020 Authors of Cilium
+# Copyright 2018-2021 Authors of Cilium
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ set -eo pipefail
 DEV="cilium-probe"
 DIR=$(dirname $0)/../../bpf
 MAPTOOL=$(dirname $0)/../../tools/maptool/maptool
-ALL_TC_PROGS="bpf_lxc bpf_host bpf_network bpf_overlay"
+ALL_TC_PROGS="bpf_lxc bpf_host bpf_network bpf_overlay custom/bpf_custom"
 TC_PROGS=${TC_PROGS:-$ALL_TC_PROGS}
 ALL_CG_PROGS="bpf_sock sockops/bpf_sockops sockops/bpf_redir"
 CG_PROGS=${CG_PROGS:-$ALL_CG_PROGS}
