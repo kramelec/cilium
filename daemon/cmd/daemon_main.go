@@ -928,6 +928,9 @@ func init() {
 	flags.Bool(option.EnableBPFBypassFIBLookup, defaults.EnableBPFBypassFIBLookup, "Enable FIB lookup bypass optimization for nodeport reverse NAT handling")
 	option.BindEnv(option.EnableBPFBypassFIBLookup)
 
+	flags.Bool(option.EnableCustomCallsName, false, "Enable tail call hooks for custom eBPF programs")
+	option.BindEnv(option.EnableCustomCallsName)
+
 	viper.BindPFlags(flags)
 
 	CustomCommandHelpFormat(RootCmd, option.HelpFlagSections)

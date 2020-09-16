@@ -53,6 +53,7 @@ static __always_inline bool redirect_to_proxy(int verdict, __u8 dir)
 }
 #endif
 
+#ifdef ENABLE_CUSTOM_CALLS
 /* Encode return value and identity into cb buffer. This is used before
  * executing tail calls to custom programs. "ret" is the return value supposed
  * to be returned to the kernel, needed by the callee to preserve the datapath
@@ -77,6 +78,7 @@ encode_custom_prog_meta(struct __ctx_buff *ctx, int ret, __u32 identity)
 	ctx_store_meta(ctx, CB_CUSTOM_CALLS, custom_meta);
 	return 0;
 }
+#endif
 
 #ifdef ENABLE_IPV6
 static __always_inline int ipv6_l3_from_lxc(struct __ctx_buff *ctx,
@@ -824,9 +826,11 @@ int tail_handle_ipv4(struct __ctx_buff *ctx)
 		return send_drop_notify(ctx, SECLABEL, dstID, 0, ret,
 					CTX_ACT_DROP, METRIC_EGRESS);
 
+#ifdef ENABLE_CUSTOM_CALLS
 	if (!encode_custom_prog_meta(ctx, ret, dstID))
 		tail_call_static(ctx, &CUSTOM_CALLS_MAP,
 				 CUSTOM_CALLS_IDX_IPV4_EGRESS);
+#endif
 
 	return ret;
 }
@@ -1348,7 +1352,9 @@ int tail_ipv4_policy(struct __ctx_buff *ctx)
 	int ret, ifindex = ctx_load_meta(ctx, CB_IFINDEX);
 	__u32 src_label = ctx_load_meta(ctx, CB_SRC_LABEL);
 	bool from_host = ctx_load_meta(ctx, CB_FROM_HOST);
+#ifdef ENABLE_CUSTOM_CALLS
 	bool proxy_redirect = false;
+#endif
 	__u16 proxy_port = 0;
 	__u8 reason = 0;
 
@@ -1359,7 +1365,9 @@ int tail_ipv4_policy(struct __ctx_buff *ctx)
 			  &proxy_port, from_host);
 	if (ret == POLICY_ACT_PROXY_REDIRECT) {
 		ret = ctx_redirect_to_proxy4(ctx, &tuple, proxy_port, from_host);
+#ifdef ENABLE_CUSTOM_CALLS
 		proxy_redirect = true;
+#endif
 	}
 	if (IS_ERR(ret))
 		return send_drop_notify(ctx, src_label, SECLABEL, LXC_ID,
@@ -1368,6 +1376,7 @@ int tail_ipv4_policy(struct __ctx_buff *ctx)
 	/* Store meta: essential for proxy ingress, see bpf_host.c */
 	ctx_store_meta(ctx, CB_PROXY_MAGIC, ctx->mark);
 
+#ifdef ENABLE_CUSTOM_CALLS
 	/* Make sure we skip the tail call when the packet is being redirected
 	 * to a L7 proxy, to avoid running the custom program twice on the
 	 * incoming packet (before redirecting, and on the way back from the
@@ -1376,6 +1385,7 @@ int tail_ipv4_policy(struct __ctx_buff *ctx)
 	if (!proxy_redirect && !encode_custom_prog_meta(ctx, ret, src_label))
 		tail_call_static(ctx, &CUSTOM_CALLS_MAP,
 				 CUSTOM_CALLS_IDX_IPV4_INGRESS);
+#endif
 
 	return ret;
 }
@@ -1385,7 +1395,9 @@ declare_tailcall_if(__and(is_defined(ENABLE_IPV4), is_defined(ENABLE_IPV6)),
 int tail_ipv4_to_endpoint(struct __ctx_buff *ctx)
 {
 	__u32 src_identity = ctx_load_meta(ctx, CB_SRC_LABEL);
+#ifdef ENABLE_CUSTOM_CALLS
 	bool proxy_redirect = false;
+#endif
 	void *data, *data_end;
 	struct iphdr *ip4;
 	__u16 proxy_port = 0;
@@ -1433,13 +1445,16 @@ int tail_ipv4_to_endpoint(struct __ctx_buff *ctx)
 			  &proxy_port, true);
 	if (ret == POLICY_ACT_PROXY_REDIRECT) {
 		ret = ctx_redirect_to_proxy_hairpin(ctx, proxy_port);
+#ifdef ENABLE_CUSTOM_CALLS
 		proxy_redirect = true;
+#endif
 	}
 out:
 	if (IS_ERR(ret))
 		return send_drop_notify(ctx, src_identity, SECLABEL, LXC_ID,
 					ret, CTX_ACT_DROP, METRIC_INGRESS);
 
+#ifdef ENABLE_CUSTOM_CALLS
 	/* Make sure we skip the tail call when the packet is being redirected
 	 * to a L7 proxy, to avoid running the custom program twice on the
 	 * incoming packet (before redirecting, and on the way back from the
@@ -1448,6 +1463,7 @@ out:
 	if (!proxy_redirect && !encode_custom_prog_meta(ctx, ret, src_identity))
 		tail_call_static(ctx, &CUSTOM_CALLS_MAP,
 				 CUSTOM_CALLS_IDX_IPV4_INGRESS);
+#endif
 
 	return ret;
 }
