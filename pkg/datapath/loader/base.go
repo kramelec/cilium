@@ -400,6 +400,8 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		// the router (cilium_host) IP is associated to.
 		if option.Config.IPAM == ipamOption.IPAMENI {
 			if len(interfaces) == 0 {
+				var iface string
+
 				if info := node.GetRouterInfo(); info != nil {
 					mac := info.GetMac()
 					iface, err := linuxrouting.RetrieveIfaceNameFromMAC(mac.String())
@@ -407,6 +409,17 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 						log.WithError(err).WithField("mac", mac).Fatal("Failed to set encrypt interface in the ENI ipam mode")
 					}
 					interfaces = append(interfaces, iface)
+				}
+				// Discover any other devices that might be needed. Here we know EKS
+				// names its interfaces eth0, eth1, eth2, so we pattern match this
+				// case.
+				if links, err := netlink.LinkList(); err == nil {
+					for _, link := range links {
+						linkName := link.Attrs().Name
+						if linkName != iface && strings.Contains(linkName, "eth*") {
+							interfaces = append(interfaces, linkName)
+						}
+					}
 				}
 			}
 			if len(option.Config.IPv4PodSubnets) == 0 {
