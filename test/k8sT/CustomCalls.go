@@ -1,0 +1,283 @@
+// Copyright 2021 Authors of Cilium
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package k8sTest
+
+import (
+	"fmt"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/cilium/cilium/pkg/defaults"
+	. "github.com/cilium/cilium/test/ginkgo-ext"
+	"github.com/cilium/cilium/test/helpers"
+	. "github.com/onsi/gomega"
+	v1 "k8s.io/api/core/v1"
+)
+
+var _ = Describe("K8sCustomCalls", func() {
+
+	var (
+		kubectl *helpers.Kubectl
+	)
+
+	type customCallDirection uint32
+
+	const (
+		// Constants for tail call hooks
+		// See CUSTOM_CALLS_IDX_* defines in bpf/lib/maps.h
+		IngressIPv4 customCallDirection = 0
+		EgressIPv4  customCallDirection = 1
+		IngressIPv6 customCallDirection = 2
+		EgressIPv6  customCallDirection = 3
+		// eBPF virtual file system
+		bpffsDir string = defaults.DefaultMapRoot + "/" + defaults.DefaultMapPrefix + "/"
+	)
+
+	BeforeAll(func() {
+		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
+		deploymentManager.SetKubectl(kubectl)
+	})
+
+	AfterEach(func() {
+		deploymentManager.DeleteAll()
+		// OR ExpectAllPodsTerminated(kubectl)
+	})
+
+	AfterFailed(func() {
+		kubectl.CiliumReport("cilium status", "cilium endpoint list")
+	})
+
+	AfterAll(func() {
+		deploymentManager.DeleteCilium()
+		// OR UninstallCiliumFromManifest(kubectl, ciliumFilename)
+		kubectl.CloseSSHClient()
+	})
+
+	JustAfterEach(func() {
+		duration := CurrentGinkgoTestDescription().Duration
+		kubectl.ValidateNoErrorsInLogs(duration)
+	})
+
+	SkipContextIf(func() bool {
+		// Believe it or not, bpftool internally attempts to retrieve
+		// map info before updating a map, but BPF_OBJ_GET_INFO_BY_FD
+		// is not supported on kernel 4.9 (it was introduced in Linux
+		// 4.13).
+		return helpers.DoesNotRunOnNetNextOr419Kernel()
+	}, "Basic test with byte counter", func() {
+
+		var (
+			yaml string
+
+			// Object file for custom program
+			objFileName   string
+			localObjFile  string
+			remoteObjFile string
+
+			// Pinned paths in bpffs
+			progPinPath string
+			mapsPinDir  string
+			mapPinPath  string
+		)
+
+		BeforeAll(func() {
+			// Initialize all paths. This cannot be done at
+			// variable declaration because kubectl is not set when
+			// the Context is initialized.
+			objFileName = "bpf_custom.o"
+			localObjFile = filepath.Join(kubectl.BasePath(), "../bpf/custom", objFileName)
+			remoteObjFile = filepath.Join("/run/cilium/state", objFileName)
+
+			progPinPath = filepath.Join(bpffsDir, "cilium_bytecounter")
+			mapsPinDir = filepath.Join(bpffsDir, "cilium_bytecounter_maps")
+			mapPinPath = filepath.Join(mapsPinDir, "bytecount_map")
+
+			yaml = helpers.ManifestGet(kubectl.BasePath(), "demo-customcalls.yaml")
+			kubectl.ApplyDefault(yaml).ExpectSuccess("Unable to apply %s", yaml)
+
+			By("Checking the availability of the custom program to load")
+
+			cmd := fmt.Sprintf("stat --format %%F %s", localObjFile)
+			res := kubectl.Exec(cmd)
+			res.ExpectSuccess(fmt.Sprintf("Could not find object file %s for custom byte counter program. Did you run 'make -C bpf' from the root of Cilium's repository?", localObjFile))
+			Expect(strings.TrimSpace(res.Stdout())).To(Equal("regular file"), fmt.Sprintf("File %s is not a regular file", localObjFile))
+		})
+
+		AfterAll(func() {
+			_ = kubectl.Delete(yaml)
+			ExpectAllPodsTerminated(kubectl)
+		})
+
+		checkOneDirection := func(endpointId int64, ciliumPod string,
+			clientName string, serverIP string, serverIdentity string,
+			direction customCallDirection) {
+
+			switch direction {
+			case IngressIPv4:
+				break
+			case EgressIPv4:
+				break
+			default:
+				// IPv6 packets do not have the same length,
+				// and the comparison on the counter value will
+				// fail. Could be adjusted in the future.
+				Failf("Direction not supported: %v", direction)
+			}
+
+			By("Updating call map with reference to custom program")
+
+			// TODO: other directions
+			cmd := fmt.Sprintf("bpftool map update pinned %scilium_calls_custom_%05d key %d 0 0 0 value pinned %s", bpffsDir, endpointId, direction, progPinPath)
+			res := kubectl.ExecPodCmd(helpers.KubeSystemNamespace, ciliumPod, cmd)
+			res.ExpectSuccess(fmt.Sprintf("Failed to update call map with reference to custom program ('%s'): %s", cmd, res.Stderr()))
+
+			By("Sending traffic between the pods")
+
+			cmd = helpers.Ping(serverIP)
+			res = kubectl.ExecPodCmd(helpers.DefaultNamespace, clientName, cmd)
+			res.ExpectSuccess(fmt.Sprintf("Failed to ping from %s to %s", "", ""))
+
+			By("Retrieving counter value")
+
+			cmd = fmt.Sprintf("bpftool -j map lookup pinned %s key %s", mapPinPath, serverIdentity)
+			cmd += " | jq -r '.value[]' | awk -n 'BEGIN {i=0; s=0} {s+=($0*(2**i)); i+=8} END {print s}'"
+			res = kubectl.ExecPodCmd(helpers.KubeSystemNamespace, ciliumPod, cmd)
+			res.ExpectSuccess(fmt.Sprintf("Failed to lookup byte counter value ('%s'): %s", cmd, res.Stderr()))
+			count, err := strconv.Atoi(strings.TrimSpace(res.Stdout()))
+			Expect(err).ToNot(HaveOccurred(), fmt.Sprintf("Failed to convert byte counter value to an integer (%s)", err))
+
+			By("Checking counter value")
+
+			expectedCount := 98 * helpers.PingCount
+			Expect(count).To(Equal(expectedCount), fmt.Sprintf("Byte count (%d) differs from expected value (%d)", count, expectedCount))
+		}
+
+		cleanupByteCounter := func(endpointId int64, ciliumPod string, serverIdentity string, direction customCallDirection) {
+			// Clean up tail call map entry
+			cmd := fmt.Sprintf("bpftool map delete pinned %scilium_calls_custom_%05d key %d 0 0 0", bpffsDir, endpointId, direction)
+			res := kubectl.ExecPodCmd(helpers.KubeSystemNamespace, ciliumPod, cmd)
+			if res.GetExitCode() != 0 {
+				log.Warningf("Failed to remove reference to byte counter program from tail call map ('%s'): %s", cmd, res.Stderr())
+			}
+
+			// Reset byte counter entry
+			cmd = fmt.Sprintf("bpftool map delete pinned %s key %s", mapPinPath, serverIdentity)
+			res = kubectl.ExecPodCmd(helpers.KubeSystemNamespace, ciliumPod, cmd)
+			if res.GetExitCode() != 0 {
+				log.Warningf("Failed to delete entry from byte counter map ('%s'): %s", cmd, res.Stderr())
+			}
+		}
+
+		It("Loads byte counter and get consistent values", func() {
+
+			// Deploy Cilium, enable tail calls to custom programs
+			deploymentManager.DeployCilium(map[string]string{
+				"customCalls.enabled": "true",
+			}, DeployCiliumOptionsAndDNS)
+
+			// Get Cilium pod on node 2
+			ciliumPodK8s2, err := kubectl.GetCiliumPodOnNode(helpers.K8s2)
+			ExpectWithOffset(1, err).ShouldNot(HaveOccurred(), "Cannot get cilium pod on k8s1")
+
+			// Get pods app1 (HTTP/FTP server) on node 1, and app2
+			// (client), on node 2
+			var (
+				podList v1.PodList
+				podApp1 v1.Pod
+				podApp2 v1.Pod
+			)
+			err = kubectl.GetPods(helpers.DefaultNamespace, "-l id=app1").Unmarshal(&podList)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(len(podList.Items)).To(Equal(1))
+			podApp1 = podList.Items[0]
+
+			err = kubectl.GetPods(helpers.DefaultNamespace, "-l id=app2").Unmarshal(&podList)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(len(podList.Items)).To(Equal(1))
+			podApp2 = podList.Items[0]
+
+			// Get ID for the endpoint for which we count the bytes
+			endpoint, err := kubectl.GetCiliumEndpoint(helpers.DefaultNamespace, podApp2.Name)
+			Expect(err).Should(BeNil(), fmt.Sprintf("Failed to retrieve endpoint for pod %s: %s", podApp2.Name, err))
+			Expect(endpoint).ShouldNot(BeNil(), fmt.Sprintf("Retrieved empty endpoint id for pod %s", podApp2.Name))
+			endpointId := endpoint.ID
+
+			// Wait for pods to be ready
+			err = kubectl.WaitforPods(helpers.DefaultNamespace, "-l zgroup=testapp", helpers.HelperTimeout)
+			Expect(err).Should(BeNil())
+
+			By("Copying custom byte counter program to Cilium pod")
+
+			cmd := fmt.Sprintf("kubectl -n kube-system cp %s %s:%s", localObjFile, ciliumPodK8s2, remoteObjFile)
+			res := kubectl.Exec(cmd)
+			res.ExpectSuccess(fmt.Sprintf("Failed to copy custom program from %s to %s:%s: %s", localObjFile, ciliumPodK8s2, remoteObjFile, res.Stderr()))
+
+			By("Loading custom byte counter program")
+
+			cmd = fmt.Sprintf("bpftool prog load %s %s type classifier pinmaps %s", remoteObjFile, progPinPath, mapsPinDir)
+			res = kubectl.ExecPodCmd(helpers.KubeSystemNamespace, ciliumPodK8s2, cmd)
+			res.ExpectSuccess(fmt.Sprintf("Failed to load custom program ('%s'): %s", cmd, res.Stderr()))
+
+			cleanupLoadedObjects := func() {
+				By("Cleaning up pinned artefacts")
+
+				// Clean up custom program
+				cmd = "rm -- " + progPinPath
+				res = kubectl.ExecPodCmd(helpers.KubeSystemNamespace, ciliumPodK8s2, cmd)
+				if res.GetExitCode() != 0 {
+					log.Warningf("Failed to unpin byte counter program ('%s'): %s", cmd, res.Stderr())
+				}
+
+				// Clean up map for custom program
+				cmd = "rm -- " + mapPinPath
+				res = kubectl.ExecPodCmd(helpers.KubeSystemNamespace, ciliumPodK8s2, cmd)
+				if res.GetExitCode() != 0 {
+					log.Warningf("Failed to unpin byte counter map ('%s'): %s", cmd, res.Stderr())
+				}
+				cmd = "rmdir -- " + mapsPinDir
+				res = kubectl.ExecPodCmd(helpers.KubeSystemNamespace, ciliumPodK8s2, cmd)
+				if res.GetExitCode() != 0 {
+					log.Warningf("Failed to remove directory for byte counter pinned map ('%s'): %s", cmd, res.Stderr())
+				}
+			}
+			defer cleanupLoadedObjects()
+
+			// Get the identity of the pod with which the monitored
+			// pod communicates. This identity is used as a key in
+			// the byte counter hash map.
+			cmd = "cilium identity list -o json | jq '.[]|select(.labels[]|contains(\"k8s:id=app1\")).id'"
+			res = kubectl.ExecPodCmd(helpers.KubeSystemNamespace, ciliumPodK8s2, cmd)
+			res.ExpectSuccess(fmt.Sprintf("Failed to retrieve pod identity ('%s'): %s", cmd, res.Stderr()))
+			identity, err := strconv.Atoi(strings.TrimSpace(res.Stdout()))
+			Expect(err).ToNot(HaveOccurred(), fmt.Sprintf("Failed to convert pod identity to an integer (%s)", err))
+			identityKey := fmt.Sprintf("%d %d %d %d",
+				identity&0xff,
+				(identity>>8)&0xff,
+				(identity>>16)&0xff,
+				(identity>>24)&0xff)
+
+			By("Attaching a program on the ingress side (IPv4)")
+
+			checkOneDirection(endpointId, ciliumPodK8s2, podApp2.Name, podApp1.Status.PodIP, identityKey, IngressIPv4)
+			cleanupByteCounter(endpointId, ciliumPodK8s2, identityKey, IngressIPv4)
+
+			By("Attaching a program on the egress side (IPv4)")
+
+			checkOneDirection(endpointId, ciliumPodK8s2, podApp2.Name, podApp1.Status.PodIP, identityKey, EgressIPv4)
+			cleanupByteCounter(endpointId, ciliumPodK8s2, identityKey, EgressIPv4)
+		})
+	})
+})
