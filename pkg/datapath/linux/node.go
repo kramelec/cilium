@@ -1078,6 +1078,8 @@ func (n *linuxNodeHandler) removeEncryptRules() error {
 		}
 	}
 
+	route.DeleteRouteTable(linux_defaults.RouteTableIPSec, netlink.FAMILY_V4)
+
 	rule.Mark = linux_defaults.RouteMarkDecrypt
 	if err := route.DeleteRuleIPv6(rule); err != nil {
 		if !os.IsNotExist(err) && !errors.Is(err, unix.EAFNOSUPPORT) {
