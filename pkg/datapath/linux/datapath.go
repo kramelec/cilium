@@ -20,6 +20,7 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/linux/config"
 	"github.com/cilium/cilium/pkg/datapath/loader"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/wireguard"
 )
 
 // DatapathConfiguration is the static configuration of the datapath. The
@@ -38,19 +39,21 @@ type linuxDatapath struct {
 	nodeAddressing datapath.NodeAddressing
 	config         DatapathConfiguration
 	loader         *loader.Loader
+	wgAgent        *wireguard.Agent
 }
 
 // NewDatapath creates a new Linux datapath
-func NewDatapath(cfg DatapathConfiguration, ruleManager datapath.IptablesManager) datapath.Datapath {
+func NewDatapath(cfg DatapathConfiguration, ruleManager datapath.IptablesManager, wgAgent *wireguard.Agent) datapath.Datapath {
 	dp := &linuxDatapath{
 		ConfigWriter:    &config.HeaderfileWriter{},
 		IptablesManager: ruleManager,
 		nodeAddressing:  NewNodeAddressing(),
 		config:          cfg,
 		loader:          loader.NewLoader(canDisableDwarfRelocations),
+		wgAgent:         wgAgent,
 	}
 
-	dp.node = NewNodeHandler(cfg, dp.nodeAddressing)
+	dp.node = NewNodeHandler(cfg, dp.nodeAddressing, wgAgent)
 
 	if cfg.EncryptInterface != "" {
 		if err := connector.DisableRpFilter(cfg.EncryptInterface); err != nil {
@@ -74,4 +77,8 @@ func (l *linuxDatapath) LocalNodeAddressing() datapath.NodeAddressing {
 
 func (l *linuxDatapath) Loader() datapath.Loader {
 	return l.loader
+}
+
+func (l *linuxDatapath) WireguardAgent() *wireguard.Agent {
+	return l.wgAgent
 }

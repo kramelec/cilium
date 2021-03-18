@@ -35,6 +35,7 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/probe"
 	"github.com/cilium/cilium/pkg/sysctl"
+	"github.com/cilium/cilium/pkg/wireguard"
 
 	"github.com/vishvananda/netlink"
 )
@@ -339,6 +340,10 @@ func initKubeProxyReplacementOptions() (strict bool) {
 
 // handleNativeDevices tries to detect bpf_host devices (if needed).
 func handleNativeDevices(strict bool) {
+	if option.Config.EnableWireguard {
+		option.Config.DirectRoutingDevice = wireguard.IfaceName
+	}
+
 	detectNodePortDevs := len(option.Config.Devices) == 0 &&
 		(option.Config.EnableNodePort || option.Config.EnableHostFirewall || option.Config.EnableBandwidthManager)
 	detectDirectRoutingDev := option.Config.EnableNodePort &&

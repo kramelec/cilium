@@ -36,6 +36,7 @@ import (
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/datapath/connector"
 	"github.com/cilium/cilium/pkg/datapath/iptables"
+	"github.com/cilium/cilium/pkg/datapath/link"
 	linuxdatapath "github.com/cilium/cilium/pkg/datapath/linux"
 	"github.com/cilium/cilium/pkg/datapath/linux/ipsec"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
@@ -76,6 +77,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/pprof"
 	"github.com/cilium/cilium/pkg/version"
+	"github.com/cilium/cilium/pkg/wireguard"
 
 	"github.com/go-openapi/loads"
 	gops "github.com/google/gops/agent"
@@ -388,6 +390,15 @@ func init() {
 
 	flags.String(option.IPSecKeyFileName, "", "Path to IPSec key file")
 	option.BindEnv(option.IPSecKeyFileName)
+
+	flags.Bool(option.EnableWireguard, false, "Enable wireguard")
+	option.BindEnv(option.EnableWireguard)
+
+	flags.String(option.WireguardSubnetV4, defaults.WireguardSubnetV4, "Wireguard tunnel IPv4 subnet")
+	option.BindEnv(option.WireguardSubnetV4)
+
+	flags.String(option.WireguardSubnetV6, defaults.WireguardSubnetV6, "Wireguard tunnel IPv6 subnet")
+	option.BindEnv(option.WireguardSubnetV6)
 
 	flags.Bool(option.ForceLocalPolicyEvalAtSource, defaults.ForceLocalPolicyEvalAtSource, "Force policy evaluation of all local communication at the source endpoint")
 	option.BindEnv(option.ForceLocalPolicyEvalAtSource)
@@ -1433,6 +1444,24 @@ func runDaemon() {
 	iptablesManager := &iptables.IptablesManager{}
 	iptablesManager.Init()
 
+	var wgAgent *wireguard.Agent
+	if option.Config.EnableWireguard {
+		var err error
+		privateKeyPath := filepath.Join(option.Config.StateDir, wireguard.PrivKeyFilename)
+		wgAgent, err = wireguard.NewAgent(privateKeyPath,
+			option.Config.WireguardSubnetV4, option.Config.WireguardSubnetV6)
+		if err != nil {
+			log.WithError(err).Fatal("Failed to initialize wireguard")
+		}
+
+		cleaner.cleanupFuncs.Add(func() {
+			_ = wgAgent.Close()
+		})
+	} else {
+		// Delete wireguard device from previous run (if such exists)
+		link.DeleteByName(wireguard.IfaceName)
+	}
+
 	if k8s.IsEnabled() {
 		bootstrapStats.k8sInit.Start()
 		if err := k8s.Init(option.Config); err != nil {
@@ -1444,7 +1473,7 @@ func runDaemon() {
 	ctx, cancel := context.WithCancel(server.ServerCtx)
 	d, restoredEndpoints, err := NewDaemon(ctx, cancel,
 		WithDefaultEndpointManager(ctx, endpoint.CheckHealth),
-		linuxdatapath.NewDatapath(datapathConfig, iptablesManager))
+		linuxdatapath.NewDatapath(datapathConfig, iptablesManager, wgAgent))
 	if err != nil {
 		select {
 		case <-server.ServerCtx.Done():
@@ -1484,6 +1513,11 @@ func runDaemon() {
 	}
 	bootstrapStats.k8sInit.End(true)
 	restoreComplete := d.initRestore(restoredEndpoints)
+	if wgAgent != nil {
+		if err := wgAgent.RestoreFinished(); err != nil {
+			log.WithError(err).Error("Failed to set up wireguard peers")
+		}
+	}
 
 	if !d.endpointManager.HostEndpointExists() {
 		log.Info("Creating host endpoint")
