@@ -25,6 +25,7 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/sysctl"
 
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
@@ -126,6 +127,12 @@ func (a *Agent) Init() error {
 		}
 	}
 
+	// To allow a remote host -> pod reply, when a pod -> remote host request is
+	// sent over non-wg iface
+	if err := sysctl.Write(fmt.Sprintf("net.ipv4.conf.%s.rp_filter", IfaceName), "2"); err != nil {
+		return nil
+	}
+
 	cfg := &wgtypes.Config{
 		PrivateKey:   &a.privKey,
 		ListenPort:   &a.listenPort,
@@ -217,6 +224,11 @@ func (a *Agent) UpdatePeer(nodeName, pubKeyHex string,
 		if podCIDRv4 != nil {
 			allowedIPs = append(allowedIPs, *podCIDRv4)
 		}
+		var nodeIPNet net.IPNet
+		nodeIPNet.IP = nodeIPv4
+		nodeIPNet.Mask = net.IPv4Mask(255, 255, 255, 255)
+		allowedIPs = append(allowedIPs, nodeIPNet)
+
 	}
 	if option.Config.EnableIPv6 {
 		if wgIPv6 != nil {
@@ -228,6 +240,10 @@ func (a *Agent) UpdatePeer(nodeName, pubKeyHex string,
 		if podCIDRv6 != nil {
 			allowedIPs = append(allowedIPs, *podCIDRv6)
 		}
+		var nodeIPNet net.IPNet
+		nodeIPNet.IP = nodeIPv6
+		nodeIPNet.Mask = net.CIDRMask(128, 128)
+		allowedIPs = append(allowedIPs, nodeIPNet)
 	}
 
 	ep := ""

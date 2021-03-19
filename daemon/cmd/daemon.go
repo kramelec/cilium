@@ -85,7 +85,9 @@ import (
 	serviceStore "github.com/cilium/cilium/pkg/service/store"
 	"github.com/cilium/cilium/pkg/sockops"
 	"github.com/cilium/cilium/pkg/status"
+	"github.com/cilium/cilium/pkg/sysctl"
 	"github.com/cilium/cilium/pkg/trigger"
+	"github.com/cilium/cilium/pkg/wireguard"
 	cnitypes "github.com/cilium/cilium/plugins/cilium-cni/types"
 
 	"github.com/sirupsen/logrus"
@@ -540,6 +542,26 @@ func NewDaemon(ctx context.Context, cancel context.CancelFunc, epMgr *endpointma
 	// and the k8s service watcher depends on option.Config.EnableNodePort flag
 	// which can be modified after the device detection.
 	handleNativeDevices(isKubeProxyReplacementStrict)
+	// In the case of pod -> remote host not being SNAT-ed (the case for BPF masq),
+	// the request might get dropped on the remote host, if it arrives to the
+	// direct routing device which has rp_filter set to 1 (aka strict mode).
+	if option.Config.EnableWireguard {
+		prevDev := option.Config.DirectRoutingDevice
+		// Set direct routing device to wireguard, so that all forwarded requests
+		// by NodePort BPF would flow over the tunnel
+		option.Config.DirectRoutingDevice = wireguard.IfaceName
+		param := fmt.Sprintf("net.ipv4.conf.%s.rp_filter", prevDev)
+		val, err := sysctl.Read(param)
+		if err != nil {
+			log.WithError(err).WithField(logfields.Device, prevDev).Fatal("Failed to read rp_filter")
+		}
+		if val == "1" {
+			log.WithField(logfields.SysParamName, param).Info("Setting from '1' to '2'")
+			if err := sysctl.Write(param, "2"); err != nil {
+				log.WithError(err).WithField(logfields.Device, prevDev).Fatal("Failed to write rp_filter=2")
+			}
+		}
+	}
 	finishKubeProxyReplacementInit(isKubeProxyReplacementStrict)
 
 	// Cgroup v2 hierarchy root used for attachment is different when running on Kind.
